@@ -76,6 +76,38 @@ Tuned for longer screen-on time, cooler idle temps, and a snappier device — fo
 
 ---
 
+## 🧪 OnePlus 9 Pro Hardware Validation
+
+The OnePlus 9 Pro combines a Snapdragon 888 (Lahaina), Adreno 660, 120 Hz LTPO display, UFS storage, wired and wireless fast charging, and stereo audio. The device tree already contains board-specific thermal, charging, display, audio, and haptic configuration. Validate behavior on the actual device before changing those settings; advertised peak specifications are not safe kernel tuning targets.
+
+### Comparison protocol
+
+- Compare stock and candidate kernels with the same ROM, vendor firmware, apps, and device configuration. Change one kernel area at a time.
+- Keep ambient temperature, starting battery charge, display brightness/refresh mode, network conditions, and workload consistent. Repeat each test at least three times and record build identifiers.
+- Capture temperatures and throttling, CPU/GPU frequencies and utilization, frame-time stability, battery drain, charging current, and relevant kernel/system logs. Save the raw readings as well as summaries.
+- Stop a test for unexpected temperature rise, charging instability, repeated subsystem resets, audio dropouts, or persistent frame-time degradation. Restore stock settings before investigating.
+
+### Device test matrix
+
+| Area | Validation | Evidence required before a kernel change |
+| --- | --- | --- |
+| Thermal and sustained performance | Run repeatable gaming and camera workloads; observe thermal zones, CPU/GPU clocks, throttling, and frame times. | A repeatable regression with sensor and throttling data identifying the responsible path. Preserve emergency limits and battery protections. |
+| Battery and scheduler | Compare screen-off idle, scrolling, and sustained-load drain with CASS, BORE, uclamp, schedutil, workqueue, and Adrenoboost settings unchanged except for the single variable under test. | Repeatable energy or responsiveness results without worse thermal behavior, background work, or frame pacing. |
+| LTPO display | Exercise supported panel variants, adaptive refresh transitions, scrolling, and static content; check refresh residency, flicker, and frame pacing. | Reproduced panel-mode issue and verified panel-specific data. Do not guess timings, voltages, or refresh tables. |
+| Charging | Test wired and wireless charging separately across battery states and thermal conditions; record current, temperature, negotiated mode, and disconnects. | Battery, charger, and coil documentation plus measured evidence. Do not raise current or temperature limits based on advertised wattage. |
+| Audio and haptics | Check left/right speaker output, USB-C analog headset output and microphone, headset detection, suspend/resume, and haptic operation. | Device logs or repeatable functional failure. Keep the existing NXP amplifier path; do not enable WSA/SoundWire speaker nodes without hardware evidence. |
+| UFS and connectivity | Compare storage latency under representative I/O; test Wi-Fi and Bluetooth idle/active power, throughput, reconnects, and coexistence. | Measured regression, relevant subsystem logs, and evidence that the proposed change matches the board and firmware. |
+
+### Existing implementation to audit
+
+- `/home/runner/work/Levion_kernel_OP9/Levion_kernel_OP9/arch/arm64/boot/dts/vendor/oplus/lemonadev/lemonade_common.dtsi` — panel variants, thermal zones, audio routing, dual NXP TFA98xx amplifiers, USB-C audio, and AW8697 haptics.
+- `/home/runner/work/Levion_kernel_OP9/Levion_kernel_OP9/arch/arm64/boot/dts/vendor/oplus/lemonadev/lemonadep-19815.dtsi` — lemonadep charging configuration.
+- `/home/runner/work/Levion_kernel_OP9/Levion_kernel_OP9/arch/arm64/configs/vendor/lahaina-qgki_defconfig` — Lahaina CPU-frequency, thermal, UFS, GPU, audio, and USB/Type-C configuration.
+
+Camera processing, Dolby/Atmos tuning, and much audio enhancement depend on vendor firmware and Android HAL configuration. Kernel changes alone cannot safely recreate those features.
+
+---
+
 ## <img src=".github/assets/kali.png" alt="Kali" height="30"> Kali NetHunter Edition
 
 A separate **NetHunter** build (`nethunterv2` branch) adds wireless pentesting support on top of every feature above.
