@@ -184,6 +184,7 @@
 		"VA DMIC5", "VA MIC BIAS4";
 
 	qcom,msm-mbhc-hphl-swh = <0>;
+	qcom,msm-mbhc-gnd-swh = <0>;
 	asoc-codec  = <&stub_codec>, <&bolero>,
 		      <&wcd938x_codec>,
 		      <&ext_disp_audio_codec>;
