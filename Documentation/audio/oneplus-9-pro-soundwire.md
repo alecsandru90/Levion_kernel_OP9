@@ -149,9 +149,9 @@ Additional pinned comparison sources:
   rates through 176.4 kHz and S16_LE/S24_LE. This is implementation comparison,
   not a replacement for downstream SoundWire programming.
 * [OnePlus OxygenOS 12.1 C.61 source](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/tree/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio):
-  `asoc/codecs/wcd938x/wcd938x.c` rate definitions and DAI declarations,
-  `asoc/msm-dai-q6-v2.c` MI2S hw_params/DAIs, and
-  `asoc/codecs/tfa98xx-v6/tfa98xx_v6.c` formats, startup and hw_params.
+  [WCD938x rate definitions and DAI declarations](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/codecs/wcd938x/wcd938x.c),
+  [Q6 MI2S hw_params/DAIs](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/msm-dai-q6-v2.c), and
+  [TFA formats, startup and hw_params](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/codecs/tfa98xx-v6/tfa98xx_v6.c).
   The vendor also has the WCD mask/192 kHz ceiling discrepancy and S16-only
   tertiary MI2S advertisement; these are inherited, not missing vendor imports.
 * The earlier pinned OxygenOS 11 source commit `13ca08fdf0979fdd61d5e8991661874bb2d19150`
@@ -248,6 +248,9 @@ Unresolved before any capability expansion:
 * Installed `tfa98xx.cnt` profiles, amplifier interface settings, calibration,
   protection and VI-feedback duplex clock compatibility. Startup constraints
   default off (`pcm_no_constraint=1`); the hw_params profile-rate check remains.
+  The TFA `rate_to_fssel` lookup also contains 12/24 kHz, but its DAI mask
+  does not advertise them. Neither a lookup entry nor a generic family SDK
+  proves matching handset profiles/clocking, so these rates are not enabled.
 * Matching Android audio policy/HAL mixer choices, DSP firmware and calibration.
   Kernel masks alone neither expose a new Android mode nor prove sound quality.
 
@@ -273,3 +276,82 @@ WCD masks against `rate_min/max`, RX `sr_val_tbl` and TX hw_params:
   Confirm invalid requests fail without a stuck clock, stale stream or DSP
   restart. Repeat stop/start, suspend/resume and supported SSR recovery using
   the earlier device checklist. Do not flash automatically.
+
+### Checks run for this continuation
+
+The available toolchain is Ubuntu clang/LLVM 17.0.6, not the Android clang
+`r416183b` requested by `build.config.common`. The following reproducible
+commands built the changed drivers and adjacent machine/Q6/RX paths with the
+unmodified Lahaina defconfig, including CFI/LTO:
+
+```sh
+src=/home/runner/work/Levion_kernel_OP9/Levion_kernel_OP9
+out=/tmp/levion-audio-cfi-build
+export PATH=/usr/lib/llvm-17/bin:$PATH
+export LLVM_NM=llvm-nm-17
+set -- O="$out" ARCH=arm64 LLVM=1 CC=clang-17 LD=ld.lld-17 \
+    AR=llvm-ar-17 NM=llvm-nm-17 OBJCOPY=llvm-objcopy-17 \
+    OBJDUMP=llvm-objdump-17 READELF=llvm-readelf-17 HOSTCC=clang-17 \
+    AUDIO_ROOT="$src/techpack/audio"
+make -C "$src" "$@" vendor/lahaina-qgki_defconfig
+make -C "$src" "$@" -j4 \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_dlkm.o \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_slave_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/tx_macro_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/rx_macro_dlkm.o \
+    techpack/audio/asoc/lahaina.o techpack/audio/asoc/msm-dai-q6-v2.o
+
+git -C "$src" diff --check 810b123984702c474d6b98a2b56671a5099db867 HEAD
+git -C "$src" diff 810b123984702c474d6b98a2b56671a5099db867 HEAD |
+    perl "$src/scripts/checkpatch.pl" --no-tree -
+```
+
+Results and limits:
+
+* Defconfig generation and the above focused build passed. With LTO, the
+  component objects are LLVM bitcode and composite module objects are
+  archives, not final loadable `.ko` files.
+* A separate compatibility build in `/tmp/levion-audio-build` disabled
+  `CFI_CLANG` and `LTO_CLANG` as shown below, with the same tool
+  arguments. It built the same paths and linked AArch64 ELF relocatable
+  WCD codec/slave and RX/TX macro module objects. This is not a production
+  configuration recommendation. The final WCD validator compiled in both
+  configurations.
+* The broader `Image modules` compatibility build below was intentionally
+  stopped after approximately ten minutes. It reached audio
+  `machine_dlkm.o`, `platform_dlkm.o` and `tfa98xx-v6_dlkm.o` linking without
+  a fatal compile error. It emitted unrelated scheduler warnings and did
+  **not** finish the kernel Image, final `.ko` linking or modpost validation.
+  This is an incomplete build, not a passed full build or a diagnosed audio
+  build failure. Session logs were kept outside the repository in
+  `/tmp/levion-audio-full-build.log` and `/tmp/levion-audio-cfi.log`.
+* Initial build issues were resolved: explicitly selecting LLVM's nm
+  (rather than an unavailable unversioned tool), and including
+  `<sound/pcm_params.h>` for the new format validation.
+* `git diff --check` passed; patch-mode checkpatch reported zero errors and
+  zero warnings. Manual review checked both masks against the six TX
+  switch cases, all nine playback rates against the RX table, format versus
+  container width, and early rejection before TX register writes.
+* Secret scanning of all three changed files was clean. Code review found
+  no remaining significant issues. CodeQL was requested, but **skipped
+  because the C/C++ database was too large**; it did not pass an analysis.
+* No matching-toolchain/KMI certification, physical testing, HAL negotiation
+  test, or runtime rejection test is claimed. The cases above remain device
+  regression requirements, not results from an attached phone.
+
+Compatibility-build commands (reuse `src` and tool arguments from above;
+the last `O=` overrides the earlier output directory):
+
+```sh
+out=/tmp/levion-audio-build
+make -C "$src" "$@" O="$out" vendor/lahaina-qgki_defconfig
+"$src/scripts/config" --file "$out/.config" -d CFI_CLANG -d LTO_CLANG
+make -C "$src" "$@" O="$out" olddefconfig
+make -C "$src" "$@" O="$out" -j4 \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_dlkm.o \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_slave_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/tx_macro_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/rx_macro_dlkm.o \
+    techpack/audio/asoc/lahaina.o techpack/audio/asoc/msm-dai-q6-v2.o
+make -C "$src" "$@" O="$out" -j4 Image modules
+```
