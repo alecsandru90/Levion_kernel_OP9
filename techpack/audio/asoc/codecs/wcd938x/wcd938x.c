@@ -11,6 +11,7 @@
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/component.h>
+#include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/tlv.h>
 #include <soc/soundwire.h>
@@ -53,15 +54,14 @@
 
 #define WCD938X_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |\
 			SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |\
-			SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000 |\
-			SNDRV_PCM_RATE_384000)
+			SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000)
 /* Fractional Rates */
 #define WCD938X_FRAC_RATES (SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_88200 |\
-				SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_352800)
+				SNDRV_PCM_RATE_176400)
 
 #define WCD938X_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
 		SNDRV_PCM_FMTBIT_S24_LE |\
-		SNDRV_PCM_FMTBIT_S24_3LE | SNDRV_PCM_FMTBIT_S32_LE)
+		SNDRV_PCM_FMTBIT_S24_3LE)
 
 enum {
 	CODEC_TX = 0,
@@ -4469,13 +4469,45 @@ static irqreturn_t wcd938x_wd_handle_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static int wcd938x_hw_params(struct snd_pcm_substream *substream,
+			   struct snd_pcm_hw_params *params,
+			   struct snd_soc_dai *dai)
+{
+	const struct snd_soc_pcm_stream *stream;
+	unsigned int rate = params_rate(params);
+	int format = (__force int)params_format(params);
+
+	stream = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
+		 &dai->driver->playback : &dai->driver->capture;
+
+	if (rate < stream->rate_min || rate > stream->rate_max ||
+	    !(stream->rates & snd_pcm_rate_to_rate_bit(rate))) {
+		dev_err(dai->dev, "%s: Unsupported sample rate: %u\n",
+			__func__, rate);
+		return -EINVAL;
+	}
+
+	if (format < 0 || format >= 64 ||
+	    !(stream->formats & BIT_ULL(format))) {
+		dev_err(dai->dev, "%s: Unsupported format: %d\n",
+			__func__, format);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static const struct snd_soc_dai_ops wcd938x_dai_ops = {
+	.hw_params = wcd938x_hw_params,
+};
+
 static struct snd_soc_dai_driver wcd938x_dai[] = {
 	{
 		.name = "wcd938x_cdc",
 		.playback = {
 			.stream_name = "WCD938X_AIF Playback",
-                        .rates = WCD938X_RATES | WCD938X_FRAC_RATES,
-			.formats = WCD938X_FORMATS,
+			.rates = WCD938X_RATES | WCD938X_FRAC_RATES,
+			.formats = WCD938X_FORMATS | SNDRV_PCM_FMTBIT_S32_LE,
 			.rate_max = 192000,
 			.rate_min = 8000,
 			.channels_min = 1,
@@ -4483,13 +4515,14 @@ static struct snd_soc_dai_driver wcd938x_dai[] = {
 		},
 		.capture = {
 			.stream_name = "WCD938X_AIF Capture",
-                        .rates = WCD938X_RATES | WCD938X_FRAC_RATES,
+			.rates = WCD938X_RATES,
 			.formats = WCD938X_FORMATS,
 			.rate_max = 192000,
 			.rate_min = 8000,
 			.channels_min = 1,
 			.channels_max = 4,
 		},
+		.ops = &wcd938x_dai_ops,
 	},
 };
 
