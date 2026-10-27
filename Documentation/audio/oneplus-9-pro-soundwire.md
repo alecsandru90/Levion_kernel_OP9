@@ -90,6 +90,9 @@ Public documentation limits:
 
 ## Build and static checks
 
+The continuation audit and its checks are recorded below under
+[PCM capabilities](#pcm-capabilities-continuation-audit).
+
 Use the repository's Lahaina configuration and matching LLVM/aarch64 toolchain:
 
 ```sh
@@ -125,3 +128,230 @@ at low volume and test on the exact phone/ROM combination:
 Record the kernel/ROM build, codec and SoundWire logs, `dmesg`, and relevant
 `logcat` audio/HAL errors. A successful compile or static check is not hardware
 validation; no physical-device test is claimed here.
+
+## PCM capabilities (continuation audit)
+
+### Baseline and evidence
+
+This follow-up is PR #2 against `aox-backup-20261014`, after the merge of
+[PR #1](https://github.com/alecsandru90/Levion_kernel_OP9/pull/1).
+Commit `9c794139527401dae434f3682f70b19f629c1d15` is an ancestor; its
+SoundWire debug-access fixes are retained unchanged. The audited baseline is
+[`810b123984702c474d6b98a2b56671a5099db867`](https://github.com/alecsandru90/Levion_kernel_OP9/tree/810b123984702c474d6b98a2b56671a5099db867).
+The older speaker-24-bit change is not in this baseline: both the tertiary
+MI2S default and its Q6 DAI format mask are S16_LE. This continuation does
+not change that default or claim to restore a verified speaker mode.
+
+Additional pinned comparison sources:
+
+* [Linux v6.12 WCD938x](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/sound/soc/codecs/wcd938x.c),
+  rate/format definitions: integer rates through 192 kHz, fractional playback
+  rates through 176.4 kHz and S16_LE/S24_LE. This is implementation comparison,
+  not a replacement for downstream SoundWire programming.
+* [OnePlus OxygenOS 12.1 C.61 source](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/tree/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio):
+  [WCD938x rate definitions and DAI declarations](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/codecs/wcd938x/wcd938x.c),
+  [Q6 MI2S hw_params/DAIs](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/msm-dai-q6-v2.c), and
+  [TFA formats, startup and hw_params](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/codecs/tfa98xx-v6/tfa98xx_v6.c).
+  The vendor also has the WCD mask/192 kHz ceiling discrepancy and S16-only
+  tertiary MI2S advertisement; these are inherited, not missing vendor imports.
+* The earlier pinned OxygenOS 11 source commit `13ca08fdf0979fdd61d5e8991661874bb2d19150`
+  was reverified as the December 2021 OnePlus 9/9 Pro source release.
+* The Qualcomm WCD9385 page above could not be retrieved in this audit.
+  Reported product maxima (384 kHz playback, 192 kHz recording, and differing
+  PCM-interface limits) are therefore **not used as enablement evidence**.
+  No restricted register specification was obtained.
+
+The NXP driver reads revision register `0x03` in `tfa98xx_i2c_probe()`.
+Its low-byte cases identify 0x72/73/74 as TFA9872/73/74, 0x88 as TFA9888,
+0x13 as TFA9912, 0x94 as TFA9894, 0x80/81 as TFA9890, 0x92 as TFA9891,
+0x12 as TFA9895, and 0x97/96 as TFA9897/96. Neither the generic compatible
+nor the `tfa9874_vdd-supply` property establishes the installed revision.
+No actual revision readout is available, so neither the
+[generic Tfa9xxx SDK](https://mcuxpresso.nxp.com/api_doc/dev/4667/a00009.html)
+nor an unrelated TFA9879 datasheet justifies extending this route.
+
+### Route matrix
+
+All rates below are discrete, in kHz, not continuous ranges. Let **I** mean
+8, 16, 32, 48, 96, 192 and **F** mean 44.1, 88.2, 176.4.
+These are kernel component limits, not a promise of HAL exposure, firmware
+support, bit-perfect output, or physical analogue resolution.
+
+| Route/direction | Baseline declarations and programming | Result of this continuation |
+| --- | --- | --- |
+| WCD headphone/earpiece/aux playback | `wcd938x.c` advertised I+F+352.8+384, but `rate_max=192000`; S16_LE, S24_LE, S24_3LE, S32_LE. | Mask now I+F, matching the unchanged 192 kHz ceiling; formats unchanged. No new playback mode. |
+| WCD analog-mic/headset capture | Same broad codec mask/formats as playback, but the linked TX macro advertises only I and S16_LE/S24_LE/S24_3LE. | WCD capture now declares that same integer-rate and format intersection. No fractional capture or S32_LE claim. |
+| Bolero RX primary/mix interpolation | `rx-macro.c:sr_val_tbl` maps I+F+352.8+384 to existing register values; RX DAIs allow these rates and all four playback formats. Unknown rates return `-EINVAL`. | Unchanged: macro capability does not remove the WCD DAI's 192 kHz ceiling or establish a high-rate SoundWire mode. |
+| Bolero TX decimation | `tx-macro.c` DAIs allow I and three formats through 24 bits. hw_params also contained an unadvertised 384 kHz case and no format validation. | Remove that case and validate formats before register writes: unsupported rates/formats passed through backend fixup return `-EINVAL` rather than programming a mode outside the DAI contract. |
+| RX echo capture | `rx_macro_echo`: 8/16/48; S16_LE/S24_LE/S24_3LE. | Unchanged. Not a high-rate microphone or speaker capture route. |
+| VA/low-power capture | `va-macro.c`: I and S16_LE/S24_LE/S24_3LE; independent decimator/DMIC-clock validation. | Unchanged. No high-rate/32-bit enablement inferred from RX. |
+| NXP speaker playback | TERT MI2S RX defaults to 48/S16_LE/stereo. Q6 TERT DAI advertises S16_LE; TFA advertises S16_LE/S24_LE/S32_LE and 8/11.025/16/22.05/32/44.1/48. | Unchanged effective S16_LE intersection. Every requested rate still needs a matching selected TFA container profile. No 96/192/384 kHz speaker claim. |
+| NXP feedback/capture | Separate machine TX configuration defaults to 48/S16_LE/mono. Shared MI2S clocks and vendor DSP protection/calibration are dependencies. | Unchanged; TFA capture advertisement alone is not evidence for a new microphone or independent 24-bit feedback route. |
+| Voice/AUXPCM, Bluetooth, USB digital, display audio | Separate backends, fixups, firmware and/or external sink negotiation. | Unchanged; WCD marketing maxima do not apply to these routes. |
+
+WCD now also validates hw_params against its direction-specific DAI rates,
+rate bounds and formats. Backend fixups can bypass normal capability-mask
+negotiation, so declarations alone are insufficient. This check rejects
+forced 352.8/384 kHz playback and invalid capture modes without changing
+register programming or silently substituting another mode.
+
+End-to-end integration points checked:
+
+* `techpack/audio/asoc/msm_dailink.h` pairs `rx_dma_rx0/1/2/3/5` with
+  `rx_macro_rx1/2/3/4/5` and WCD, and `tx_dma_tx3/4` with TX macro and WCD.
+  RX6 instead serves SoundWire haptics, disabled by the board. Not every
+  enumerated AFE port needs a board DAI link.
+* `lahaina.c` CDC DMA mixer rate lists include 11.025/22.05 and rates through
+  384 kHz; format lists include S32_LE. They are shared with other routes and
+  variants, not a hardware capability matrix. `cdc_dma_get_sample_rate*()`
+  maps all 13 entries in both directions. `msm_be_hw_params_fixup()` forces
+  the selected rate/format/channels. Unsupported combinations still need to
+  fail negotiation or macro hw_params; do not silently substitute 48 kHz.
+  WCD9380 versus WCD9385 playback controls are selected by the probed variant.
+* `msm-dai-q6-v2.c:msm_dai_q6_cdc_dma_hw_params()` maps S16 to 16,
+  S24_LE/S24_3LE to 24 and S32 to 32 AFE bits, rejecting unknown formats.
+  `q6afe.c:afe_port_start()` sends the CDC DMA configuration to the DSP;
+  passing a rate to AFE is not evidence that the loaded firmware accepts it.
+* `wcd938x.c` uses DT channel maps and `swr_connect_port()`, not mainline
+  SoundWire PCM hw_params. `lahaina-port-config.h` supplies bus frame/port
+  parameters. The overlay supplies RX 22.5792 MHz and TX 19.2 MHz clock
+  references; ADC mode selects separate TX bus clock rates. These are not
+  PCM sample rates and must not be changed to match a product-page maximum.
+* The active overlay chain and `lahainaauto.conf`/`lahainaautoconf.h` already
+  integrate WCD938x/slave, RX/TX/VA macros, SoundWire and Oplus TFA98xx-v6.
+  No missing source file required by these paths was demonstrated. No files,
+  firmware, register maps or DT properties were imported.
+
+### Bit depth, slots and unresolved evidence
+
+PCM payload bitrate is `sample_rate * channels * valid_bits`, not a compressed
+codec bitrate setting. S24_LE has 24 valid bits in a 32-bit memory container;
+S24_3LE packs those bits in three bytes. S32_LE advertisement does not prove a
+32-bit ADC or DAC. AFE sample width and wire slot width are separate.
+
+For example, `lahaina.c:get_mi2s_bits_per_sample()` uses 32-bit MI2S slots
+for either 24-bit format. At 48 kHz/stereo, 24-bit payload is 2.304 Mbit/s,
+but two 32-bit slots require 3.072 MHz bit clock. This is **not** evidence
+that the installed TFA container configures those slots: its TDM setter is
+a no-op and its hw_params selects a profile by rate, not format.
+The existing S16 default remains 1.536 Mbit/s with two 16-bit slots.
+SoundWire adds its own framing/port overhead; PCM payload is not bus bandwidth.
+Generic Q6 TDM accepts only 16/32-bit slots, despite the machine's shared
+16/24/32 slot-width control; no TDM expansion is made for this board.
+
+Unresolved before any capability expansion:
+
+* Actual WCD variant, amplifier revision IDs and target-board clock/transport
+  qualification at 352.8/384 kHz or new sample widths.
+* Public direction/interface-specific register documentation; do not equate
+  RX interpolation support with ADC, SoundWire or PCM-interface support.
+* Installed `tfa98xx.cnt` profiles, amplifier interface settings, calibration,
+  protection and VI-feedback duplex clock compatibility. Startup constraints
+  default off (`pcm_no_constraint=1`); the hw_params profile-rate check remains.
+  The TFA `rate_to_fssel` lookup also contains 12/24 kHz, but its DAI mask
+  does not advertise them. Neither a lookup entry nor a generic family SDK
+  proves matching handset profiles/clocking, so these rates are not enabled.
+* Matching Android audio policy/HAL mixer choices, DSP firmware and calibration.
+  Kernel masks alone neither expose a new Android mode nor prove sound quality.
+
+### Regression and safe runtime cases
+
+There is no dedicated audio constraint unit-test harness in this tree; none
+is introduced solely for this small mask/validation correction. Review the
+WCD masks against `rate_min/max`, RX `sr_val_tbl` and TX hw_params:
+
+* Playback retains every I+F rate and all four formats at or below 192 kHz.
+  WCD capture retains every I rate and S16_LE/S24_LE/S24_3LE.
+* Reject WCD capture 44.1/88.2/176.4 kHz and S32_LE; reject 11.025/22.05
+  on WCD paths and 352.8/384 on the WCD link. TX hw_params must reject
+  fractional rates, 384 kHz and S32_LE even when supplied by backend fixup.
+* Check the unchanged 48 kHz/S16 defaults first. On hardware, request each
+  intended backend mode through the matching HAL/mixer setup and inspect the
+  actual backend parameters, not just the frontend stream's rate.
+* Only with verified container/interface settings, test S24_LE/32-slot
+  negotiation separately from packed S24_3LE and S32_LE. Do not force them
+  on the speakers on the basis of this document.
+* At low volume, repeat headphone playback and microphone capture separately
+  and concurrently, then speaker playback with protection/feedback enabled.
+  Confirm invalid requests fail without a stuck clock, stale stream or DSP
+  restart. Repeat stop/start, suspend/resume and supported SSR recovery using
+  the earlier device checklist. Do not flash automatically.
+
+### Checks run for this continuation
+
+The available toolchain is Ubuntu clang/LLVM 17.0.6, not the Android clang
+`r416183b` requested by `build.config.common`. The following reproducible
+commands built the changed drivers and adjacent machine/Q6/RX paths with the
+unmodified Lahaina defconfig, including CFI/LTO:
+
+```sh
+src=/home/runner/work/Levion_kernel_OP9/Levion_kernel_OP9
+out=/tmp/levion-audio-cfi-build
+export PATH=/usr/lib/llvm-17/bin:$PATH
+export LLVM_NM=llvm-nm-17
+set -- O="$out" ARCH=arm64 LLVM=1 CC=clang-17 LD=ld.lld-17 \
+    AR=llvm-ar-17 NM=llvm-nm-17 OBJCOPY=llvm-objcopy-17 \
+    OBJDUMP=llvm-objdump-17 READELF=llvm-readelf-17 HOSTCC=clang-17 \
+    AUDIO_ROOT="$src/techpack/audio"
+make -C "$src" "$@" vendor/lahaina-qgki_defconfig
+make -C "$src" "$@" -j4 \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_dlkm.o \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_slave_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/tx_macro_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/rx_macro_dlkm.o \
+    techpack/audio/asoc/lahaina.o techpack/audio/asoc/msm-dai-q6-v2.o
+
+git -C "$src" diff --check 810b123984702c474d6b98a2b56671a5099db867 HEAD
+git -C "$src" diff 810b123984702c474d6b98a2b56671a5099db867 HEAD |
+    perl "$src/scripts/checkpatch.pl" --no-tree -
+```
+
+Results and limits:
+
+* Defconfig generation and the above focused build passed. With LTO, the
+  component objects are LLVM bitcode and composite module objects are
+  archives, not final loadable `.ko` files.
+* A separate compatibility build in `/tmp/levion-audio-build` disabled
+  `CFI_CLANG` and `LTO_CLANG` as shown below, with the same tool
+  arguments. It built the same paths and linked AArch64 ELF relocatable
+  WCD codec/slave and RX/TX macro module objects. This is not a production
+  configuration recommendation. The final WCD validator compiled in both
+  configurations.
+* The broader `Image modules` compatibility build below was intentionally
+  stopped after approximately ten minutes. It reached audio
+  `machine_dlkm.o`, `platform_dlkm.o` and `tfa98xx-v6_dlkm.o` linking without
+  a fatal compile error. It emitted unrelated scheduler warnings and did
+  **not** finish the kernel Image, final `.ko` linking or modpost validation.
+  This is an incomplete build, not a passed full build or a diagnosed audio
+  build failure. Session logs were kept outside the repository in
+  `/tmp/levion-audio-full-build.log` and `/tmp/levion-audio-cfi.log`.
+* Initial build issues were resolved: explicitly selecting LLVM's nm
+  (rather than an unavailable unversioned tool), and including
+  `<sound/pcm_params.h>` for the new format validation.
+* `git diff --check` passed; patch-mode checkpatch reported zero errors and
+  zero warnings. Manual review checked both masks against the six TX
+  switch cases, all nine playback rates against the RX table, format versus
+  container width, and early rejection before TX register writes.
+* Secret scanning of all three changed files was clean. Code review found
+  no remaining significant issues. CodeQL was requested, but **skipped
+  because the C/C++ database was too large**; it did not pass an analysis.
+* No matching-toolchain/KMI certification, physical testing, HAL negotiation
+  test, or runtime rejection test is claimed. The cases above remain device
+  regression requirements, not results from an attached phone.
+
+Compatibility-build commands (reuse `src` and tool arguments from above;
+the last `O=` overrides the earlier output directory):
+
+```sh
+out=/tmp/levion-audio-build
+make -C "$src" "$@" O="$out" vendor/lahaina-qgki_defconfig
+"$src/scripts/config" --file "$out/.config" -d CFI_CLANG -d LTO_CLANG
+make -C "$src" "$@" O="$out" olddefconfig
+make -C "$src" "$@" O="$out" -j4 \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_dlkm.o \
+    techpack/audio/asoc/codecs/wcd938x/wcd938x_slave_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/tx_macro_dlkm.o \
+    techpack/audio/asoc/codecs/bolero/rx_macro_dlkm.o \
+    techpack/audio/asoc/lahaina.o techpack/audio/asoc/msm-dai-q6-v2.o
+make -C "$src" "$@" O="$out" -j4 Image modules
+```

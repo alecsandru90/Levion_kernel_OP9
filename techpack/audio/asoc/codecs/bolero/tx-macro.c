@@ -10,6 +10,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/pm_runtime.h>
+#include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/tlv.h>
@@ -1290,6 +1291,17 @@ static int tx_macro_hw_params(struct snd_pcm_substream *substream,
 		 dai->name, dai->id, params_rate(params),
 		 params_channels(params));
 
+	switch (params_format(params)) {
+	case SNDRV_PCM_FORMAT_S16_LE:
+	case SNDRV_PCM_FORMAT_S24_LE:
+	case SNDRV_PCM_FORMAT_S24_3LE:
+		break;
+	default:
+		dev_err(component->dev, "%s: Invalid TX format: %d\n",
+			__func__, params_format(params));
+		return -EINVAL;
+	}
+
 	sample_rate = params_rate(params);
 	switch (sample_rate) {
 	case 8000:
@@ -1309,9 +1321,6 @@ static int tx_macro_hw_params(struct snd_pcm_substream *substream,
 		break;
 	case 192000:
 		tx_fs_rate = 6;
-		break;
-	case 384000:
-		tx_fs_rate = 7;
 		break;
 	default:
 		dev_err(component->dev, "%s: Invalid TX sample rate: %d\n",
