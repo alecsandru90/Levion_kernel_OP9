@@ -18,7 +18,6 @@
 #define SWR_SLV_MAX_REG_ADDR    0x2009
 #define SWR_SLV_START_REG_ADDR  0x40
 #define SWR_SLV_MAX_BUF_LEN     20
-#define BYTES_PER_LINE          12
 #define SWR_SLV_RD_BUF_LEN      8
 #define SWR_SLV_WR_BUF_LEN      32
 #define SWR_SLV_MAX_DEVICES     2
@@ -47,25 +46,23 @@ static int codec_debug_open(struct inode *inode, struct file *file)
 static int get_parameters(char *buf, u32 *param1, int num_of_par)
 {
 	char *token = NULL;
-	int base = 0, cnt = 0;
+	int base, cnt = 0;
 
-	token = strsep(&buf, " ");
-	for (cnt = 0; cnt < num_of_par; cnt++) {
-		if (token) {
-			if ((token[1] == 'x') || (token[1] == 'X'))
-				base = 16;
-			else
-				base = 10;
+	if (!buf || !param1 || num_of_par <= 0)
+		return -EINVAL;
 
-			if (kstrtou32(token, base, &param1[cnt]) != 0)
-				return -EINVAL;
-
-			token = strsep(&buf, " ");
-		} else {
+	while ((token = strsep(&buf, " \t\n\r")) != NULL) {
+		if (!*token)
+			continue;
+		base = token[0] == '0' &&
+		       (token[1] == 'x' || token[1] == 'X') ? 16 : 10;
+		if (cnt >= num_of_par ||
+		    kstrtou32(token, base, &param1[cnt]))
 			return -EINVAL;
-		}
+		cnt++;
 	}
-	return 0;
+
+	return cnt == num_of_par ? 0 : -EINVAL;
 }
 
 static bool is_swr_slv_reg_readable(int reg)
@@ -102,33 +99,49 @@ static ssize_t wcd938x_swrslave_reg_show(struct swr_device *pdev,
 					char __user *ubuf,
 					size_t count, loff_t *ppos)
 {
-	int i, reg_val, len;
+	int i, len, ret;
+	u32 reg_val;
 	ssize_t total = 0;
+	size_t offset, copy_len;
 	char tmp_buf[SWR_SLV_MAX_BUF_LEN];
 
-	if (!ubuf || !ppos)
+	if (!pdev || !ubuf || !ppos || *ppos < 0)
+		return -EINVAL;
+	if (!count)
 		return 0;
 
-	for (i = (((int) *ppos/BYTES_PER_LINE) + SWR_SLV_START_REG_ADDR);
-		i <= SWR_SLV_MAX_REG_ADDR; i++) {
+	offset = *ppos;
+	for (i = SWR_SLV_START_REG_ADDR; i <= SWR_SLV_MAX_REG_ADDR; i++) {
 		if (!is_swr_slv_reg_readable(i))
 			continue;
-		swr_read(pdev, pdev->dev_num, i, &reg_val, 1);
+
+		len = snprintf(tmp_buf, sizeof(tmp_buf), "0x%.3x: 0x00\n", i);
+		if (len < 0)
+			return total ? total : len;
+		if (offset >= len) {
+			offset -= len;
+			continue;
+		}
+
+		ret = swr_read(pdev, pdev->dev_num, i, &reg_val, 1);
+		if (ret)
+			return total ? total : ret;
 		len = snprintf(tmp_buf, sizeof(tmp_buf), "0x%.3x: 0x%.2x\n", i,
 			       (reg_val & 0xFF));
-		if (((total + len) >= count - 1) || (len < 0))
-			break;
-		if (copy_to_user((ubuf + total), tmp_buf, len)) {
+		if (len < 0)
+			return total ? total : len;
+		copy_len = min_t(size_t, len - offset, count - total);
+		if (copy_to_user(ubuf + total, tmp_buf + offset, copy_len)) {
 			pr_err("%s: fail to copy reg dump\n", __func__);
-			total = -EFAULT;
-			goto copy_err;
+			return total ? total : -EFAULT;
 		}
-		total += len;
-		*ppos += len;
+		total += copy_len;
+		*ppos += copy_len;
+		offset = 0;
+		if (copy_len < len || total == count)
+			break;
 	}
 
-copy_err:
-	*ppos = SWR_SLV_MAX_REG_ADDR * BYTES_PER_LINE;
 	return total;
 }
 
@@ -137,7 +150,7 @@ static ssize_t codec_debug_dump(struct file *file, char __user *ubuf,
 {
 	struct swr_device *pdev;
 
-	if (!count || !file || !ppos || !ubuf)
+	if (!file || !ppos || !ubuf)
 		return -EINVAL;
 
 	pdev = file->private_data;
@@ -175,7 +188,7 @@ static ssize_t codec_debug_read(struct file *file, char __user *ubuf,
 			(wcd938x_slave->read_data & 0xFF));
 
 	return simple_read_from_buffer(ubuf, count, ppos, lbuf,
-					       strnlen(lbuf, 7));
+					       strnlen(lbuf, sizeof(lbuf)));
 }
 
 static ssize_t codec_debug_peek_write(struct file *file,
@@ -210,15 +223,16 @@ static ssize_t codec_debug_peek_write(struct file *file,
 
 	lbuf[cnt] = '\0';
 	rc = get_parameters(lbuf, param, 1);
-	if (!((param[0] <= SWR_SLV_MAX_REG_ADDR) && (rc == 0)))
+	if (rc)
+		return rc;
+	if (param[0] > SWR_SLV_MAX_REG_ADDR)
 		return -EINVAL;
-	swr_read(pdev, pdev->dev_num, param[0], &wcd938x_slave->read_data, 1);
-	if (rc == 0)
-		rc = cnt;
-	else
-		pr_err("%s: rc = %d\n", __func__, rc);
+	rc = swr_read(pdev, pdev->dev_num, param[0],
+		      &wcd938x_slave->read_data, 1);
+	if (rc)
+		return rc;
 
-	return rc;
+	return cnt;
 }
 
 static ssize_t codec_debug_write(struct file *file,
@@ -229,7 +243,7 @@ static ssize_t codec_debug_write(struct file *file,
 	u32 param[5];
 	struct swr_device *pdev;
 
-	if (!file || !ppos || !ubuf)
+	if (!cnt || !file || !ppos || !ubuf)
 		return -EINVAL;
 
 	pdev = file->private_data;
@@ -245,30 +259,32 @@ static ssize_t codec_debug_write(struct file *file,
 
 	lbuf[cnt] = '\0';
 	rc = get_parameters(lbuf, param, 2);
-	if (!((param[0] <= SWR_SLV_MAX_REG_ADDR) &&
-		(param[1] <= 0xFF) && (rc == 0)))
+	if (rc)
+		return rc;
+	if (param[0] > SWR_SLV_MAX_REG_ADDR || param[1] > 0xFF)
 		return -EINVAL;
-	swr_write(pdev, pdev->dev_num, param[0], &param[1]);
-	if (rc == 0)
-		rc = cnt;
-	else
-		pr_err("%s: rc = %d\n", __func__, rc);
+	rc = swr_write(pdev, pdev->dev_num, param[0], &param[1]);
+	if (rc)
+		return rc;
 
-	return rc;
+	return cnt;
 }
 
 static const struct file_operations codec_debug_write_ops = {
+	.owner = THIS_MODULE,
 	.open = codec_debug_open,
 	.write = codec_debug_write,
 };
 
 static const struct file_operations codec_debug_read_ops = {
+	.owner = THIS_MODULE,
 	.open = codec_debug_open,
 	.read = codec_debug_read,
 	.write = codec_debug_peek_write,
 };
 
 static const struct file_operations codec_debug_dump_ops = {
+	.owner = THIS_MODULE,
 	.open = codec_debug_open,
 	.read = codec_debug_dump,
 };
@@ -287,6 +303,7 @@ static int wcd938x_slave_bind(struct device *dev,
 		return -EINVAL;
 	}
 
+	pdev->dev_num = 0;
 	do {
 		/* Add delay for soundwire enumeration */
 		usleep_range(100, 110);
@@ -311,6 +328,10 @@ static void wcd938x_slave_unbind(struct device *dev,
 	struct wcd938x_slave_priv *wcd938x_slave = NULL;
 	struct swr_device *pdev = to_swr_device(dev);
 
+	if (!pdev)
+		return;
+
+	pdev->dev_num = 0;
 	wcd938x_slave = swr_get_dev_data(pdev);
 	if (!wcd938x_slave) {
 		dev_err(&pdev->dev, "%s: wcd938x_slave is NULL\n", __func__);
@@ -338,6 +359,7 @@ static const struct component_ops wcd938x_slave_comp_ops = {
 static int wcd938x_swr_probe(struct swr_device *pdev)
 {
 	struct wcd938x_slave_priv *wcd938x_slave = NULL;
+	int ret;
 
 	wcd938x_slave = devm_kzalloc(&pdev->dev,
 				sizeof(struct wcd938x_slave_priv), GFP_KERNEL);
@@ -348,37 +370,37 @@ static int wcd938x_swr_probe(struct swr_device *pdev)
 
 	wcd938x_slave->swr_slave = pdev;
 
+	ret = component_add(&pdev->dev, &wcd938x_slave_comp_ops);
+	if (ret) {
+		swr_set_dev_data(pdev, NULL);
+		return ret;
+	}
+
 #ifdef CONFIG_DEBUG_FS
-	if (!wcd938x_slave->debugfs_wcd938x_dent) {
-		wcd938x_slave->debugfs_wcd938x_dent = debugfs_create_dir(
-						dev_name(&pdev->dev), 0);
-		if (!IS_ERR(wcd938x_slave->debugfs_wcd938x_dent)) {
-			wcd938x_slave->debugfs_peek =
-					debugfs_create_file("swrslave_peek",
-					S_IFREG | 0444,
-					wcd938x_slave->debugfs_wcd938x_dent,
-					(void *) pdev,
-					&codec_debug_read_ops);
+	wcd938x_slave->debugfs_wcd938x_dent = debugfs_create_dir(
+						dev_name(&pdev->dev), NULL);
+	if (IS_ERR_OR_NULL(wcd938x_slave->debugfs_wcd938x_dent)) {
+		wcd938x_slave->debugfs_wcd938x_dent = NULL;
+		return 0;
+	}
 
-			wcd938x_slave->debugfs_poke =
-					debugfs_create_file("swrslave_poke",
-					S_IFREG | 0444,
-					wcd938x_slave->debugfs_wcd938x_dent,
-					(void *) pdev,
-					&codec_debug_write_ops);
+	wcd938x_slave->debugfs_peek =
+			debugfs_create_file("swrslave_peek",
+			S_IFREG | 0444, wcd938x_slave->debugfs_wcd938x_dent,
+			pdev, &codec_debug_read_ops);
 
-			wcd938x_slave->debugfs_reg_dump =
-					debugfs_create_file(
-					"swrslave_reg_dump",
-					S_IFREG | 0444,
-					wcd938x_slave->debugfs_wcd938x_dent,
-					(void *) pdev,
-					&codec_debug_dump_ops);
-                }
-        }
+	wcd938x_slave->debugfs_poke =
+			debugfs_create_file("swrslave_poke",
+			S_IFREG | 0444, wcd938x_slave->debugfs_wcd938x_dent,
+			pdev, &codec_debug_write_ops);
+
+	wcd938x_slave->debugfs_reg_dump =
+			debugfs_create_file("swrslave_reg_dump",
+			S_IFREG | 0444, wcd938x_slave->debugfs_wcd938x_dent,
+			pdev, &codec_debug_dump_ops);
 #endif
 
-	return component_add(&pdev->dev, &wcd938x_slave_comp_ops);
+	return 0;
 }
 
 static int wcd938x_swr_remove(struct swr_device *pdev)
