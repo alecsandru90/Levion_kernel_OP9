@@ -355,3 +355,74 @@ make -C "$src" "$@" O="$out" -j4 \
     techpack/audio/asoc/lahaina.o techpack/audio/asoc/msm-dai-q6-v2.o
 make -C "$src" "$@" O="$out" -j4 Image modules
 ```
+
+## High-performance and quality-mode audit
+
+### Scope and evidence
+
+This audit follows merged [PR #1](https://github.com/alecsandru90/Levion_kernel_OP9/pull/1)
+and [PR #2](https://github.com/alecsandru90/Levion_kernel_OP9/pull/2). The PCM
+rate/format constraints from PR #2 remain in effect; this follow-up does not
+repeat or override them. No source-level mode, gain, clock, voltage, or power
+limit is changed.
+
+The public [Qualcomm WCD9385 product page](https://www.qualcomm.com/audio/applications/compute-and-mobile-audio/products/wcd9385)
+distinguishes high-performance playback (quoted at 29.75 mW) from low-power
+playback (6.95 mW). These are WCD9385 product figures, not measurements of this
+phone and not proof that its installed WCD938x variant supports every listed
+mode. Higher codec power is not evidence of louder output or higher acoustic
+power. The public [NXP portable-device amplifier overview](https://www.nxp.com/products/audio/audio-amplifiers/portable-device-amplifiers%3AMC_71426)
+describes family-level smart-amplifier capabilities; it does not identify this
+phone's TFA silicon revision or authorize a profile, gain, or boost setting.
+
+For comparison, OnePlus's public
+[OxygenOS 12.1 C.61 WCD938x driver](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/codecs/wcd938x/wcd938x.c)
+and [TFA98xx-v6 driver](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350/blob/1e7b5673e7cc29d9af9fb0f58597055d07de6c6a/kernel/msm-5.4/techpack/audio/asoc/codecs/tfa98xx-v6/tfa98xx_v6.c)
+are pinned to the August 2022 `LE2121_11.C.61` source synchronization. They
+confirm the downstream control and driver interfaces, not the current phone's
+runtime mode, firmware, or calibration.
+
+### Route-by-route behavior
+
+| Route | Existing controls and behavior | Decision in this follow-up |
+| --- | --- | --- |
+| Wired headphone/earpiece RX | WCD938x RX is on `swr1`; the codec exposes `RX HPH Mode`, and DAPM applies the selected class/mode as headphone or earpiece paths power up/down. The WCD9385 control enum includes `CLS_H_HIFI`; the WCD9380 enum does not, and its setter maps a HIFI request to `CLS_H_ULP`. The driver identifies WCD9380 versus WCD9385 from an efuse register at probe, while the board DT only names the WCD938x family. | No new control or default. The exact silicon variant and active Android mixer selection are not established by this checkout. Do not assume HIFI is selectable or active from the generic compatible or Qualcomm product page. |
+| Analog-microphone capture | WCD TX/ADC1-4 use `swr2`. Existing `TX0 MODE`-`TX3 MODE` enums include `ADC_HIFI`, `ADC_LO_HIF`, `ADC_NORMAL`, and `ADC_LP`; WCD9385 also exposes `ADC_ULP1` and `ADC_ULP2`. The driver associates LP/ULP choices with lower SoundWire clock rates; invalid/unset ADC mode is converted to normal when the ADC path is enabled. | No ADC-mode change. Neither the active HAL mixer choice nor a board-specific quality/power qualification is available here. These mode names do not prove improved capture quality or a supported high-rate PCM route. |
+| Built-in speakers | The enabled board route is two generic `nxp,tfa98xx` I2C amplifiers on TERT MI2S, not the disabled WSA SoundWire speakers. MI2S defaults to 48 kHz/S16_LE/stereo and the Q6 TERT playback DAI is S16_LE-only. The TFA driver reads revision register `0x03` at probe and can build profile/vstep controls from external `tfa98xx.cnt` data. | No power/profile/vstep change. The DT supply label `tfa9874_vdd` and generic compatible do not establish the runtime chip ID. The configured speaker-resistance window is a calibration/mute guard, not a speaker power rating; full speaker thermal/excursion limits and runtime calibration values are not in this checkout. Keep existing protection, calibration, and gain limits intact. |
+| USB-C headset and other outputs | Analog headset detection/output uses the WCD/MBHC path above. USB digital, Bluetooth, and external-display audio use separate backends and are not changed by WCD HPH or TFA speaker mode controls. | No route or mixer-path change; verify each separately on the device. |
+
+The board sets `tfa_min_range = <5000>` and `tfa_max_range = <8000>` mΩ for
+each speaker. Calibration rejects a measured primary resistance outside that
+window and sets the speaker-resistance failure flag; the TFA startup path keeps
+the amplifiers muted while that flag is set. This guard is preserved unchanged.
+
+The WCD HPH mode selector is a kernel mixer control, not a sample-rate or
+volume control. Its setting is consumed by DAPM/codec transitions; the control
+being present does not show that Android's HAL selects it. The TFA profile
+controls are data-driven by the loaded container, and their safe limits depend
+on the matching amplifier, speaker, profile, and calibration. This repository
+does not include the handset's Android audio HAL configuration or installed
+TFA container, so it cannot establish a user-facing “high quality” setting or
+safely select a higher-power speaker profile.
+
+### Evidence gaps and device validation
+
+Before any mode or speaker-power change could be considered, obtain the exact
+WCD variant and both TFA runtime IDs from the target phone, the matching
+OnePlus HAL/mixer configuration, and the installed TFA profile/container plus
+speaker calibration/limits. The driver's `WCD938X_1_0` info string is a
+software version label, not a physical die-revision reading. The public
+Qualcomm and NXP overview pages are not
+substitutes for revision-specific programming and qualification evidence.
+Accordingly this change does not add an opt-in high-power mode, change class H
+or class AB defaults, raise gain, or alter speaker protection.
+
+For later device validation, do not flash automatically. First record the
+kernel/ROM, WCD variant, TFA probe IDs, active mixer values, and firmware/profile
+logs. At low volume, test the existing headphone and speaker defaults, then
+headset detection, left/right routing, suspend/resume, and the normal fallback
+after stopping/restarting streams. Only test a non-default WCD mode if the
+runtime variant and vendor HAL explicitly support it; change it with streams
+stopped, keep volume low, monitor temperature, and restore the prior value.
+Do not force a TFA profile/vstep, bypass protection, or claim louder output
+from a codec performance mode. No physical-device test is claimed.
